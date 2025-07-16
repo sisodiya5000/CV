@@ -1,152 +1,145 @@
 import streamlit as st
-import pandas as pd
 import os
-import re
-from datetime import datetime, timedelta
-import fitz  # PyMuPDF
+import sqlite3
+from datetime import datetime
+from datetime import date as dated
 
-# Folder to store uploaded CV files
-UPLOAD_FOLDER = "cv_uploads"
-TRASH_FOLDER = "cv_trash"
+# ---------- CONFIG ----------
+UPLOAD_FOLDER = "uploads"
+ALLOWED_USERS = ["user1", "user2", "user3", "user4", "user5"]
+COMMON_PASSWORD = "smart123"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(TRASH_FOLDER, exist_ok=True)
 
-# Function to extract real info from PDF using regex
-def extract_cv_info_from_pdf(pdf_path):
-    try:
-        with fitz.open(pdf_path) as doc:
-            text = "\n".join([page.get_text() for page in doc])
+# ---------- DB INIT ----------
+def init_db():
+    conn = sqlite3.connect("files.db")
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS documents (
+            uploader TEXT,
+            filename TEXT,
+            filepath TEXT,
+            uploaded_on TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-        name_match = re.search(r"(?i)([A-Z][a-z]+\s[A-Z][a-z]+)", text)
-        name = name_match.group(1) if name_match else os.path.basename(pdf_path).split("_")[0]
+# ---------- FILE FUNCTIONS ----------
+def save_file(uploader, file):
+    filepath = os.path.join(UPLOAD_FOLDER, f"{uploader}_{file.name}")
+    with open(filepath, "wb") as f:
+        f.write(file.getbuffer())
+    conn = sqlite3.connect("files.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO documents VALUES (?, ?, ?, ?)", (
+        uploader, file.name, filepath, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+    conn.commit()
+    conn.close()
 
-        email_match = re.search(r"[\w\.-]+@[\w\.-]+", text)
-        phone_match = re.search(r"(?:(?:\+91[-\s]?)?|0)?[6-9]\d{9}", text)
-        exp_match = re.search(r"(\d+\+?\s*(?:years?|yrs?|yr|year|experience|exp))", text, re.IGNORECASE)
+def list_all_files():
+    conn = sqlite3.connect("files.db")
+    c = conn.cursor()
+    c.execute("SELECT rowid, uploader, filename, filepath, uploaded_on FROM documents")
+    files = c.fetchall()
+    conn.close()
+    return files
 
-        education_match = re.findall(r"(?i)(B\.?Tech|M\.?Tech|MBA|B\.?Sc|M\.?Sc|PGDC|Diploma|B\.?E|M\.?E)[^\n]{0,60}", text)
-        education = ", ".join(set([e.strip() for e in education_match])) if education_match else "Not Found"
+def delete_file(rowid, path):
+    if os.path.exists(path):
+        os.remove(path)
+    conn = sqlite3.connect("files.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM documents WHERE rowid=?", (rowid,))
+    conn.commit()
+    conn.close()
 
-        summary = f"{name} has experience in {education.lower()} with approx. {exp_match.group(1).lower() if exp_match else 'unknown experience length'}. Contact: {email_match.group(0) if email_match else 'no email found'}."
+def replace_file(rowid, old_path, uploader, new_file):
+    if os.path.exists(old_path):
+        os.remove(old_path)
+    new_path = os.path.join(UPLOAD_FOLDER, f"{uploader}_{new_file.name}")
+    with open(new_path, "wb") as f:
+        f.write(new_file.getbuffer())
+    conn = sqlite3.connect("files.db")
+    c = conn.cursor()
+    c.execute("""
+        UPDATE documents 
+        SET filename=?, filepath=?, uploaded_on=?
+        WHERE rowid=?
+    """, (new_file.name, new_path, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), rowid))
+    conn.commit()
+    conn.close()
 
-        return {
-            "Name": name,
-            "Email": email_match.group(0) if email_match else "Not Found",
-            "Phone": phone_match.group(0) if phone_match else "Not Found",
-            "Experience": exp_match.group(1) if exp_match else "Not Found",
-            "Education": education,
-            "Summary": summary,
-            
-        }
-    except Exception as e:
-        return {"Name": "Error", "Email": str(e), "Phone": "-", "Experience": "-", "Education": "-", "Summary": "-"}
+# ---------- MAIN ----------
+def main():
+    st.set_page_config("📂 Shared Document Dashboard")
+    st.title("📂 Shared Document Dashboard (Only 5 Users Access)")
 
-@st.cache_data
-def load_database():
-    if os.path.exists("cv_database.csv"):
-        df = pd.read_csv("cv_database.csv")
-        if "Summary" not in df.columns or df["Summary"].isnull().all():
-            df["Summary"] = df.apply(
-                lambda row: f"{row['Name']} has experience in {row['Education'].lower()} with approx. {row['Experience'].lower() if row['Experience'] != 'Not Found' else 'unknown experience length'}. Contact: {row['Email']}.",
-                axis=1
-            )
-            df.to_csv("cv_database.csv", index=False)
-        return df
-    return pd.DataFrame(columns=["Name", "Email", "Phone", "Experience", "Education", "Summary"])
+    init_db()
 
-st.set_page_config(page_title="CV Dashboard", layout="wide")
-st.title("📄 CV Management Dashboard")
+    # --- LOGIN ---
+    st.sidebar.title("🔐 Login")
+    username = st.sidebar.text_input("Username")
+    password = st.sidebar.text_input("Password", type="password")
+    if st.sidebar.button("Login"):
+        if username in ALLOWED_USERS and password == COMMON_PASSWORD:
+            st.session_state["user"] = username
+            st.success(f"✅ Welcome {username}!")
+        else:
+            st.error("❌ Invalid credentials")
 
-# Upload Section
-st.sidebar.header("📤 Upload CVs")
-uploaded_files = st.sidebar.file_uploader("Upload CV Files (PDF only)", type=["pdf"], accept_multiple_files=True)
+    # --- MAIN DASHBOARD ---
+    if "user" in st.session_state:
+        user = st.session_state["user"]
+        st.markdown(f"**🔓 Logged in as:** `{user}`")
 
-df = load_database()
-# Ensure File Name column is never shown
-if "File Name" in df.columns:
-    df = df.drop(columns=["File Name"])
-last_deleted_row = st.session_state.get("last_deleted", None)
-trash_df = st.session_state.get("trash_bin", pd.DataFrame(columns=["Name", "Email", "Phone", "Experience", "Education", "Summary", "Deleted At"]))
+        uploaded_file = st.file_uploader("📤 Upload a document (shared with all users)", type=None)
+        if uploaded_file:
+            save_file(user, uploaded_file)
+            st.success("✅ File uploaded successfully!")
+            st.experimental_rerun()
 
-if uploaded_files:
-    st.sidebar.success(f"Uploaded {len(uploaded_files)} file(s). Extracting...")
-    for uploaded_file in uploaded_files:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_path = os.path.join(UPLOAD_FOLDER, f"{timestamp}_{uploaded_file.name}")
-        with open(save_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        st.markdown("### 🔍 Search & Filter Documents")
 
-        info = extract_cv_info_from_pdf(save_path)
-        df = pd.concat([df, pd.DataFrame([info])], ignore_index=True)
+        # --- Filters ---
+        all_files = list_all_files()
+        search_query = st.text_input("Search by filename (partial match allowed)")
+        min_date = st.date_input("From Date", value=dated(2024, 1, 1))
+        max_date = st.date_input("To Date", value=dated.today())
 
-    df = df.drop_duplicates(subset="Email")
-    df = df.sort_values(by="Name").reset_index(drop=True)
-    df = df[["Name", "Email", "Phone", "Experience", "Education", "Summary"]]
-    df.to_csv("cv_database.csv", index=False)
-    st.sidebar.success("✅ CVs Extracted, Saved, and Database Updated!")
+        # --- Filter logic ---
+        filtered_files = []
+        for rowid, uploader, filename, path, uploaded_on in all_files:
+            file_date = datetime.strptime(uploaded_on, "%Y-%m-%d %H:%M:%S").date()
+            if (
+                search_query.lower() in filename.lower()
+                and min_date <= file_date <= max_date
+            ):
+                filtered_files.append((rowid, uploader, filename, path, uploaded_on))
 
-# Display Section
-st.subheader("🧾 Extracted CV Details")
-selected_index = st.number_input("Enter row number to delete (starting from 0):", min_value=0, max_value=len(df)-1 if len(df) > 0 else 0, step=1)
-delete_confirm = st.checkbox("Confirm deletion of selected CV")
+        # --- Display filtered results ---
+        st.markdown("### 📁 Filtered Files:")
+        if filtered_files:
+            for rowid, uploader, filename, path, date in filtered_files:
+                with st.expander(f"📄 {filename} (by {uploader} on {date})"):
+                    with open(path, "rb") as f:
+                        st.download_button("⬇️ Download", f, file_name=filename)
 
-if st.button("🗑️ Delete Selected CV"):
-    if delete_confirm:
-        try:
-            row_data = df.loc[selected_index].copy()
-            file_to_delete = None  # File Name removed
-            row_data["Deleted At"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.session_state["last_deleted"] = row_data
-            trash_df = pd.concat([trash_df, pd.DataFrame([row_data])], ignore_index=True)
-            df = df.drop(index=selected_index).reset_index(drop=True)
-            df.to_csv("cv_database.csv", index=False)
-            st.session_state["trash_bin"] = trash_df
-            st.success("CV moved to Trash Bin!")
-        except Exception as e:
-            st.error(f"Error deleting CV: {e}")
-    else:
-        st.warning("Please confirm deletion before proceeding.")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        new_file = st.file_uploader(f"Replace `{filename}`", key=f"replace_{rowid}")
+                        if new_file:
+                            replace_file(rowid, path, user, new_file)
+                            st.success("✅ File replaced!")
+                            st.experimental_rerun()
+                    with col2:
+                        if st.button(f"❌ Delete `{filename}`", key=f"delete_{rowid}"):
+                            delete_file(rowid, path)
+                            st.warning("🗑 File deleted")
+                            st.experimental_rerun()
+        else:
+            st.info("🔎 No files match your filters.")
 
-if last_deleted_row is not None:
-    if st.button("♻️ Undo Last Delete"):
-        df = pd.concat([df, pd.DataFrame([last_deleted_row.drop("Deleted At") if "Deleted At" in last_deleted_row else last_deleted_row])], ignore_index=True)
-        df = df.drop_duplicates(subset="Email")
-        df = df.sort_values(by="Name").reset_index(drop=True)
-        df.to_csv("cv_database.csv", index=False)
-        st.session_state["last_deleted"] = None
-        st.success("Last deleted CV restored!")
-
-# Only show non-deleted CVs
-if not df.empty:
-    st.dataframe(df, use_container_width=True)
-else:
-    st.info("No CVs available. Upload new ones or restore from trash.")
-
-with st.expander("🗑️ Trash Bin History"):
-    if not trash_df.empty:
-        st.dataframe(trash_df, use_container_width=True)
-        restore_index = st.number_input("Enter row number from trash to restore:", min_value=0, max_value=len(trash_df)-1, step=1)
-        if st.button("🔄 Restore from Trash"):
-            row_to_restore = trash_df.loc[restore_index].copy()
-            trash_df = trash_df.drop(index=restore_index).reset_index(drop=True)
-            df = pd.concat([df, pd.DataFrame([row_to_restore.drop("Deleted At") if "Deleted At" in row_to_restore else row_to_restore])], ignore_index=True)
-            df = df.drop_duplicates(subset="Email")
-            df = df.sort_values(by="Name").reset_index(drop=True)
-            df.to_csv("cv_database.csv", index=False)
-            restored_file = None  # File Name removed
-            st.session_state["trash_bin"] = trash_df
-            st.success("CV restored from Trash!")
-    else:
-        st.info("Trash bin is empty.")
-
-# Auto-delete trash older than 10 days
-now = datetime.now()
-for filename in os.listdir(TRASH_FOLDER):
-    file_path = os.path.join(TRASH_FOLDER, filename)
-    if os.path.isfile(file_path):
-        file_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-        if (now - file_time).days > 10:
-            os.remove(file_path)
-
-with st.expander("📥 Download Extracted Data"):
-    st.download_button("Download as CSV", df.to_csv(index=False), "cv_database.csv")
+if __name__ == "__main__":
+    main()
